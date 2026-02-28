@@ -22,7 +22,15 @@ class Settings(BaseSettings):
     # 模型配置
     model_dir: str = "./models"  # 模型文件夹路径
     default_model: str = "u2net"  # 默认模型
-    
+
+    # 上传限制配置
+    max_file_size_mb: int = 10  # 最大文件大小（MB）
+    max_request_size_mb: int = 50  # 最大请求体大小（MB）
+
+    # 并发控制配置
+    max_concurrent_requests: int = 5  # 最大并发请求数
+    request_timeout_seconds: int = 120  # 请求超时时间（秒）
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

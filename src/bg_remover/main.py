@@ -1,17 +1,33 @@
 """FastAPI主入口"""
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import asyncio
+
+# 在导入其他模块前先配置路径
+import sys
+from pathlib import Path
+src_dir = Path(__file__).parent.parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
 
 try:
-    from .api.routes import router
-    from .core.config import get_settings
+    from bg_remover.api.routes import router
+    from bg_remover.core.config import get_settings
+    from bg_remover.core.limiter import init_limiter
 except ImportError:
     from api.routes import router
     from core.config import get_settings
+    from core.limiter import init_limiter
 
 
 def create_app() -> FastAPI:
     """创建FastAPI应用"""
+    settings = get_settings()
+
+    # 初始化并发限制器
+    init_limiter(settings.max_concurrent_requests)
+
     app = FastAPI(
         title="Background Remover Service",
         description="HTTP streaming service for image background removal based on rembg",

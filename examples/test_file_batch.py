@@ -9,8 +9,8 @@ import time
 BASE_URL = "http://localhost:8000"
 
 # 测试配置
-INPUT_DIR = "./test_images"  # 输入文件夹
-OUTPUT_DIR = "./test_output"  # 输出文件夹
+INPUT_DIR = "D:/workspace/remove_background/data"  # 输入文件夹
+OUTPUT_DIR = "D:/workspace/remove_background/output"  # 输出文件夹
 MODEL = "isnet-anime"  # 模型选择
 CONCURRENT_LIMIT = 3  # 并发数限制
 
@@ -139,13 +139,13 @@ async def batch_process_files(
     
     # 获取所有图像文件
     image_files = []
-    for ext in ["*.png", "*.jpg", "*.jpeg", "*.webp"]:
+    for ext in ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tiff", "*.tif", "*.gif"]:
         image_files.extend(input_path.glob(ext))
-    
+
     if not image_files:
         print(f"❌ 错误: 未找到图像文件")
         return
-    
+
     print(f"\n找到 {len(image_files)} 个图像文件")
     print(f"开始处理...\n")
     
@@ -214,13 +214,13 @@ async def batch_process_with_progress(
     
     # 获取所有图像文件
     image_files = []
-    for ext in ["*.png", "*.jpg", "*.jpeg", "*.webp"]:
+    for ext in ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tiff", "*.tif", "*.gif"]:
         image_files.extend(input_path.glob(ext))
-    
+
     if not image_files:
         print(f"❌ 错误: 未找到图像文件")
         return
-    
+
     print(f"\n找到 {len(image_files)} 个图像文件")
     
     # 顺序处理

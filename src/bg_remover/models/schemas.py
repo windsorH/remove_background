@@ -9,8 +9,8 @@ class RemoveBgUrlRequest(BaseModel):
     image_url: str = Field(..., description="图像URL")
     output_type: Literal["file", "oss"] = Field(default="file", description="输出类型")
     output_path: str = Field(..., description="输出路径")
-    model: Literal["u2net", "u2net_human_seg", "u2netp", "silueta"] = Field(
-        default="u2net", description="分割模型"
+    model: Literal["u2net", "u2net_human_seg", "isnet-anime", "birefnet-portrait"] = Field(
+        default="u2net", description="分割模型: u2net(通用), u2net_human_seg(人像), isnet-anime(动漫), birefnet-portrait(高精度人像)"
     )
     stream: bool = Field(default=False, description="是否流式响应")
 
@@ -19,8 +19,8 @@ class RemoveBgFileRequest(BaseModel):
     """文件移除背景请求（用于非流式）"""
     output_type: Literal["file", "oss"] = Field(default="file", description="输出类型")
     output_path: str = Field(..., description="输出路径")
-    model: Literal["u2net", "u2net_human_seg", "u2netp", "silueta"] = Field(
-        default="u2net", description="分割模型"
+    model: Literal["u2net", "u2net_human_seg", "isnet-anime", "birefnet-portrait"] = Field(
+        default="u2net", description="分割模型: u2net(通用), u2net_human_seg(人像), isnet-anime(动漫), birefnet-portrait(高精度人像)"
     )
     stream: bool = Field(default=False, description="是否流式响应")
 

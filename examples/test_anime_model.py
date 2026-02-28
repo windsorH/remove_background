@@ -208,7 +208,7 @@ async def batch_process_anime_files():
     
     # 获取所有图像文件
     image_files = []
-    for ext in ["*.png", "*.jpg", "*.jpeg", "*.webp"]:
+    for ext in ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tiff", "*.tif", "*.gif"]:
         image_files.extend(input_dir.glob(ext))
     
     if not image_files:
