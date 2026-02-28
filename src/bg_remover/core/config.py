@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     max_concurrent_requests: int = 5  # 最大并发请求数
     request_timeout_seconds: int = 120  # 请求超时时间（秒）
 
+    # 线程池配置
+    thread_pool_workers: int = 4  # 线程池工作线程数
+
+    # 模型预热配置
+    enable_model_warmup: bool = True  # 是否启用模型预热
+    warmup_models: str = "u2net, isnet-anime"  # 要预热的模型，逗号分隔
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

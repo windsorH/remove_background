@@ -22,6 +22,8 @@ try:
     from ..services.oss_uploader import get_uploader
     from ..core.config import get_settings
     from ..core.limiter import get_limiter, with_concurrency_limit
+    from ..core.thread_pool import get_thread_pool
+    from ..core.model_warmer import get_warmer
 except ImportError:
     from models.schemas import (
         RemoveBgUrlRequest,
@@ -35,14 +37,44 @@ except ImportError:
     from services.oss_uploader import get_uploader
     from core.config import get_settings
     from core.limiter import get_limiter, with_concurrency_limit
+    from core.thread_pool import get_thread_pool
+    from core.model_warmer import get_warmer
 
 router = APIRouter()
 
 
-@router.get("/health", response_model=HealthResponse)
+@router.get("/health")
 async def health_check():
-    """健康检查"""
-    return HealthResponse()
+    """健康检查 - 包含服务状态详情"""
+    from datetime import datetime
+
+    settings = get_settings()
+
+    # 获取已预热模型列表
+    warmed_models = []
+    try:
+        warmer = get_warmer()
+        warmed_models = warmer.get_warmed_models()
+    except RuntimeError:
+        pass  # 预热器未初始化
+
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "timestamp": datetime.now(),
+        "config": {
+            "max_concurrent_requests": settings.max_concurrent_requests,
+            "request_timeout_seconds": settings.request_timeout_seconds,
+            "thread_pool_workers": settings.thread_pool_workers,
+            "max_file_size_mb": settings.max_file_size_mb,
+            "enable_model_warmup": settings.enable_model_warmup,
+        },
+        "models": {
+            "available": BackgroundRemover.MODELS,
+            "warmed": warmed_models,
+            "default": settings.default_model
+        }
+    }
 
 
 @router.get("/v1/models")
