@@ -1,0 +1,284 @@
+"""API路由"""
+import json
+import time
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse
+from typing import AsyncGenerator
+
+try:
+    from ..models.schemas import (
+        RemoveBgUrlRequest,
+        RemoveBgResponse,
+        HealthResponse,
+        StreamEvent
+    )
+    from ..services.bg_remover import get_remover, get_available_models, BackgroundRemover
+    from ..services.input_loader import InputLoader
+    from ..services.output_saver import OutputSaver
+    from ..services.oss_uploader import get_uploader
+    from ..core.config import get_settings
+except ImportError:
+    from models.schemas import (
+        RemoveBgUrlRequest,
+        RemoveBgResponse,
+        HealthResponse,
+        StreamEvent
+    )
+    from services.bg_remover import get_remover, get_available_models, BackgroundRemover
+    from services.input_loader import InputLoader
+    from services.output_saver import OutputSaver
+    from services.oss_uploader import get_uploader
+    from core.config import get_settings
+
+router = APIRouter()
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health_check():
+    """健康检查"""
+    return HealthResponse()
+
+
+@router.get("/v1/models")
+async def list_models():
+    """
+    获取所有可用的背景移除模型列表
+    
+    Returns:
+        模型列表，包含名称、描述和适用场景
+    """
+    return {
+        "success": True,
+        "data": get_available_models()
+    }
+
+
+@router.get("/v1/models/{model_name}/info")
+async def get_model_info(model_name: str):
+    """
+    获取指定模型的详细信息
+    
+    Args:
+        model_name: 模型名称
+        
+    Returns:
+        模型详细信息
+    """
+    if model_name not in BackgroundRemover.MODELS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"模型 '{model_name}' 不存在。可用模型: {BackgroundRemover.MODELS}"
+        )
+    
+    models_info = get_available_models()
+    model_info = next((m for m in models_info if m["name"] == model_name), None)
+    
+    return {
+        "success": True,
+        "data": model_info
+    }
+
+
+async def process_stream(
+    image_data: bytes,
+    output_type: str,
+    output_path: str,
+    model: str
+) -> AsyncGenerator[str, None]:
+    """
+    流式处理背景移除
+    
+    Yields:
+        NDJSON格式的流式事件
+    """
+    start_time = time.time()
+    
+    try:
+        # 1. 开始
+        yield json.dumps({
+            "type": "start",
+            "timestamp": int(time.time())
+        }) + "\n"
+        
+        # 2. 加载/处理
+        yield json.dumps({
+            "type": "progress",
+            "step": "process",
+            "percent": 30,
+            "message": "正在移除背景..."
+        }) + "\n"
+        
+        remover = get_remover(model)
+        output_data, info = remover.remove_with_info(image_data)
+        
+        # 3. 输出
+        yield json.dumps({
+            "type": "progress",
+            "step": "output",
+            "percent": 70,
+            "message": "正在保存结果..."
+        }) + "\n"
+        
+        settings = get_settings()
+        result_url = None
+        
+        if output_type == "oss":
+            uploader = get_uploader()
+            if not uploader.is_configured():
+                raise ValueError("OSS未配置，无法上传到OSS")
+            result_url = uploader.upload(output_path, output_data)
+        else:
+            saver = OutputSaver(settings.output_dir)
+            result_url = saver.save(output_data, output_path)
+        
+        # 4. 完成
+        processing_time = round(time.time() - start_time, 2)
+        yield json.dumps({
+            "type": "complete",
+            "result": {
+                "url": result_url,
+                "path": output_path,
+                "width": info["width"],
+                "height": info["height"],
+                "format": info["format"],
+                "processing_time": processing_time
+            }
+        }) + "\n"
+        
+    except Exception as e:
+        yield json.dumps({
+            "type": "error",
+            "error": str(e)
+        }) + "\n"
+
+
+@router.post("/v1/bg/remove/url")
+async def remove_bg_url(request: RemoveBgUrlRequest):
+    """
+    从URL移除背景
+    
+    - stream=true: 返回流式响应（NDJSON）
+    - stream=false: 返回普通JSON响应
+    """
+    try:
+        # 加载图像
+        loader = InputLoader()
+        image_data = await loader.from_url(request.image_url)
+        
+        if request.stream:
+            # 流式响应
+            return StreamingResponse(
+                process_stream(
+                    image_data,
+                    request.output_type,
+                    request.output_path,
+                    request.model
+                ),
+                media_type="application/x-ndjson"
+            )
+        else:
+            # 非流式响应
+            start_time = time.time()
+            
+            remover = get_remover(request.model)
+            output_data, info = remover.remove_with_info(image_data)
+            
+            settings = get_settings()
+            result_url = None
+            
+            if request.output_type == "oss":
+                uploader = get_uploader()
+                if not uploader.is_configured():
+                    raise HTTPException(status_code=500, detail="OSS未配置")
+                result_url = uploader.upload(request.output_path, output_data)
+            else:
+                saver = OutputSaver(settings.output_dir)
+                result_url = saver.save(output_data, request.output_path)
+            
+            processing_time = round(time.time() - start_time, 2)
+            
+            return RemoveBgResponse(
+                success=True,
+                data={
+                    "url": result_url,
+                    "path": request.output_path,
+                    "width": info["width"],
+                    "height": info["height"],
+                    "format": info["format"],
+                    "processing_time": processing_time
+                }
+            )
+            
+    except Exception as e:
+        if request.stream:
+            async def error_stream():
+                yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+            return StreamingResponse(error_stream(), media_type="application/x-ndjson")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/v1/bg/remove/file")
+async def remove_bg_file(
+    file: UploadFile = File(..., description="上传的图像文件"),
+    output_type: str = Form(default="file", description="输出类型: file/oss"),
+    output_path: str = Form(..., description="输出路径"),
+    model: str = Form(default="u2net", description="分割模型"),
+    stream: bool = Form(default=False, description="是否流式响应")
+):
+    """
+    从上传文件移除背景
+    
+    - stream=true: 返回流式响应（NDJSON）
+    - stream=false: 返回普通JSON响应
+    """
+    try:
+        # 读取上传的文件
+        image_data = await file.read()
+        
+        if stream:
+            # 流式响应
+            return StreamingResponse(
+                process_stream(image_data, output_type, output_path, model),
+                media_type="application/x-ndjson"
+            )
+        else:
+            # 非流式响应
+            start_time = time.time()
+            
+            remover = get_remover(model)
+            output_data, info = remover.remove_with_info(image_data)
+            
+            settings = get_settings()
+            result_url = None
+            
+            if output_type == "oss":
+                uploader = get_uploader()
+                if not uploader.is_configured():
+                    raise HTTPException(status_code=500, detail="OSS未配置")
+                result_url = uploader.upload(output_path, output_data)
+            else:
+                saver = OutputSaver(settings.output_dir)
+                result_url = saver.save(output_data, output_path)
+            
+            processing_time = round(time.time() - start_time, 2)
+            
+            return RemoveBgResponse(
+                success=True,
+                data={
+                    "url": result_url,
+                    "path": output_path,
+                    "width": info["width"],
+                    "height": info["height"],
+                    "format": info["format"],
+                    "processing_time": processing_time
+                }
+            )
+            
+    except Exception as e:
+        if stream:
+            async def error_stream():
+                yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+            return StreamingResponse(error_stream(), media_type="application/x-ndjson")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))
