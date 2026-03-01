@@ -89,7 +89,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Background Remover Service",
         description="HTTP streaming service for image background removal based on rembg",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan
     )
 

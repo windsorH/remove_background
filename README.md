@@ -13,8 +13,9 @@
   - `isnet-anime` - ⭐ 动漫/卡通专用模型
   - `birefnet-portrait` - 高精度人像模型
 - **批量处理**: 支持批量文件和 URL 处理
-- **模型管理**: 模型文件本地存储，支持自定义路径
+- **模型管理**: 模型文件本地存储，支持自定义路径，LRU缓存防止内存泄漏
 - **性能优化**: 线程池处理、模型预热、并发控制
+- **错误处理**: 自定义异常体系，统一的错误响应格式
 - **安全防护**: 文件大小限制、请求超时、并发限制
 
 ## 📁 项目结构
@@ -23,15 +24,19 @@
 bg_remover/
 ├── src/bg_remover/
 │   ├── main.py                 # FastAPI 入口
-│   ├── api/routes.py           # API 路由
-│   ├── models/schemas.py       # 数据模型
+│   ├── api/
+│   │   └── routes.py           # API 路由
+│   ├── models/
+│   │   └── schemas.py          # 数据模型
 │   ├── services/
 │   │   ├── bg_remover.py       # 背景移除核心
+│   │   ├── bg_processor.py     # 背景处理服务（新增）
 │   │   ├── input_loader.py     # 输入加载
 │   │   ├── output_saver.py     # 输出保存
 │   │   └── oss_uploader.py     # OSS 上传
 │   └── core/
 │       ├── config.py           # 配置管理
+│       ├── exceptions.py       # 自定义异常（新增）
 │       ├── limiter.py          # 并发限制器
 │       ├── thread_pool.py      # 线程池管理
 │       └── model_warmer.py     # 模型预热器
@@ -46,6 +51,8 @@ bg_remover/
 ├── start_server.py             # 启动脚本
 ├── download_models.py          # 模型下载脚本
 ├── requirements.txt            # 依赖
+├── pyproject.toml              # 项目配置
+├── API.md                      # API 文档
 └── .env.example               # 环境变量示例
 ```
 
@@ -119,7 +126,7 @@ GET /health
 ```json
 {
     "status": "ok",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "timestamp": "2024-01-01T00:00:00",
     "config": {
         "max_concurrent_requests": 5,
@@ -227,7 +234,7 @@ python examples/test_anime_model.py
 
 ## 📊 响应格式
 
-### 非流式响应
+### 成功响应（非流式）
 
 ```json
 {
@@ -243,14 +250,41 @@ python examples/test_anime_model.py
 }
 ```
 
+### 错误响应（非流式）
+
+```json
+{
+    "success": false,
+    "error": "文件大小超过限制。最大允许: 10.0MB, 实际: 15.50MB",
+    "error_code": "FILE_SIZE_EXCEEDED"
+}
+```
+
 ### 流式响应 (NDJSON)
 
+**进度事件**:
 ```
 {"type": "start", "timestamp": 1700000000}
 {"type": "progress", "step": "process", "percent": 30, "message": "正在移除背景..."}
 {"type": "progress", "step": "output", "percent": 70, "message": "正在保存结果..."}
 {"type": "complete", "result": {"url": "./output/output.png", ...}}
 ```
+
+**错误事件**:
+```
+{"type": "error", "success": false, "error": "模型 'xxx' 不存在", "error_code": "MODEL_NOT_FOUND"}
+```
+
+### 错误码说明
+
+| 错误码 | HTTP 状态码 | 说明 |
+|--------|-------------|------|
+| `IMAGE_LOAD_ERROR` | 400 | 图像加载失败 |
+| `IMAGE_PROCESS_ERROR` | 500 | 图像处理失败 |
+| `MODEL_NOT_FOUND` | 404 | 模型不存在 |
+| `OSS_CONFIG_ERROR` | 500 | OSS 未配置 |
+| `FILE_SIZE_EXCEEDED` | 413 | 文件大小超过限制 |
+| `TIMEOUT` | 504 | 请求超时 |
 
 ## 💻 客户端示例
 
@@ -323,7 +357,12 @@ curl -X POST "http://localhost:8000/v1/bg/remove/file" \
 5. **模型预热**: 启动时会自动预热配置的模型，首次启动可能需要额外时间
 6. **文件大小限制**: 默认限制上传文件大小为 10MB，可通过配置调整
 
-## � 性能优化
+## ⚡ 性能优化
+
+### 架构优化
+- **BgProcessor 服务类**: 封装核心处理逻辑，代码复用率提升
+- **LRU 缓存**: 模型实例使用 LRU 缓存（最多8个），防止内存泄漏
+- **统一异常处理**: 自定义异常体系，错误处理更加规范
 
 ### 线程池处理
 - 图像处理在线程池中执行，不阻塞主事件循环

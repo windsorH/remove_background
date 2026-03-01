@@ -2,52 +2,37 @@
 import json
 import time
 import asyncio
+from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
 
-# 文件大小限制（字节）
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
-
-try:
-    from ..models.schemas import (
-        RemoveBgUrlRequest,
-        RemoveBgResponse,
-        HealthResponse,
-        StreamEvent
-    )
-    from ..services.bg_remover import get_remover, get_available_models, BackgroundRemover
-    from ..services.input_loader import InputLoader
-    from ..services.output_saver import OutputSaver
-    from ..services.oss_uploader import get_uploader
-    from ..core.config import get_settings
-    from ..core.limiter import get_limiter, with_concurrency_limit
-    from ..core.thread_pool import get_thread_pool
-    from ..core.model_warmer import get_warmer
-except ImportError:
-    from models.schemas import (
-        RemoveBgUrlRequest,
-        RemoveBgResponse,
-        HealthResponse,
-        StreamEvent
-    )
-    from services.bg_remover import get_remover, get_available_models, BackgroundRemover
-    from services.input_loader import InputLoader
-    from services.output_saver import OutputSaver
-    from services.oss_uploader import get_uploader
-    from core.config import get_settings
-    from core.limiter import get_limiter, with_concurrency_limit
-    from core.thread_pool import get_thread_pool
-    from core.model_warmer import get_warmer
+from ..models.schemas import (
+    RemoveBgUrlRequest,
+    RemoveBgResponse,
+    HealthResponse,
+    StreamEvent
+)
+from ..services.bg_remover import get_available_models, BackgroundRemover
+from ..services.bg_processor import get_processor
+from ..services.input_loader import InputLoader
+from ..core.config import get_settings
+from ..core.limiter import get_limiter
+from ..core.model_warmer import get_warmer
+from ..core.exceptions import BgRemoverError, TimeoutError as BgTimeoutError
 
 router = APIRouter()
+
+
+def get_max_file_size_bytes() -> int:
+    """获取最大文件大小限制（字节）"""
+    settings = get_settings()
+    return settings.max_file_size_mb * 1024 * 1024
 
 
 @router.get("/health")
 async def health_check():
     """健康检查 - 包含服务状态详情"""
-    from datetime import datetime
-
     settings = get_settings()
 
     # 获取已预热模型列表
@@ -125,19 +110,20 @@ async def process_stream(
 ) -> AsyncGenerator[str, None]:
     """
     流式处理背景移除
-    
+
     Yields:
         NDJSON格式的流式事件
     """
     start_time = time.time()
-    
+    processor = get_processor()
+
     try:
         # 1. 开始
         yield json.dumps({
             "type": "start",
             "timestamp": int(time.time())
         }) + "\n"
-        
+
         # 2. 加载/处理
         yield json.dumps({
             "type": "progress",
@@ -145,10 +131,11 @@ async def process_stream(
             "percent": 30,
             "message": "正在移除背景..."
         }) + "\n"
-        
-        remover = get_remover(model)
-        output_data, info = remover.remove_with_info(image_data)
-        
+
+        output_data, info = await processor.process_image(
+            image_data, model, output_type, output_path
+        )
+
         # 3. 输出
         yield json.dumps({
             "type": "progress",
@@ -156,19 +143,9 @@ async def process_stream(
             "percent": 70,
             "message": "正在保存结果..."
         }) + "\n"
-        
-        settings = get_settings()
-        result_url = None
-        
-        if output_type == "oss":
-            uploader = get_uploader()
-            if not uploader.is_configured():
-                raise ValueError("OSS未配置，无法上传到OSS")
-            result_url = uploader.upload(output_path, output_data)
-        else:
-            saver = OutputSaver(settings.output_dir)
-            result_url = saver.save(output_data, output_path)
-        
+
+        result_url = processor.save_result(output_data, output_type, output_path)
+
         # 4. 完成
         processing_time = round(time.time() - start_time, 2)
         yield json.dumps({
@@ -182,7 +159,7 @@ async def process_stream(
                 "processing_time": processing_time
             }
         }) + "\n"
-        
+
     except Exception as e:
         yield json.dumps({
             "type": "error",
@@ -190,21 +167,30 @@ async def process_stream(
         }) + "\n"
 
 
+async def _load_image_from_url(url: str, timeout: int) -> bytes:
+    """从URL加载图像（带超时）"""
+    loader = InputLoader()
+    try:
+        return await asyncio.wait_for(
+            loader.from_url(url),
+            timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="下载图像超时")
+
+
 async def _remove_bg_url_with_limit(request: RemoveBgUrlRequest):
     """带并发限制的URL背景移除处理"""
     settings = get_settings()
     limiter = get_limiter()
+    processor = get_processor()
 
     async with limiter:
-        # 加载图像（带超时）
-        loader = InputLoader()
-        try:
-            image_data = await asyncio.wait_for(
-                loader.from_url(request.image_url),
-                timeout=settings.request_timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            raise HTTPException(status_code=504, detail="下载图像超时")
+        # 加载图像
+        image_data = await _load_image_from_url(
+            request.image_url,
+            settings.request_timeout_seconds
+        )
 
         if request.stream:
             # 流式响应
@@ -218,43 +204,45 @@ async def _remove_bg_url_with_limit(request: RemoveBgUrlRequest):
                 media_type="application/x-ndjson"
             )
         else:
-            # 非流式响应（带超时）
-            start_time = time.time()
-
-            remover = get_remover(request.model)
-
-            try:
-                output_data, info = await asyncio.wait_for(
-                    asyncio.to_thread(remover.remove_with_info, image_data),
-                    timeout=settings.request_timeout_seconds
-                )
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=504, detail="处理图像超时")
-
-            result_url = None
-
-            if request.output_type == "oss":
-                uploader = get_uploader()
-                if not uploader.is_configured():
-                    raise HTTPException(status_code=500, detail="OSS未配置")
-                result_url = uploader.upload(request.output_path, output_data)
-            else:
-                saver = OutputSaver(settings.output_dir)
-                result_url = saver.save(output_data, request.output_path)
-
-            processing_time = round(time.time() - start_time, 2)
-
-            return RemoveBgResponse(
-                success=True,
-                data={
-                    "url": result_url,
-                    "path": request.output_path,
-                    "width": info["width"],
-                    "height": info["height"],
-                    "format": info["format"],
-                    "processing_time": processing_time
-                }
+            # 非流式响应
+            result = await processor.process_and_save(
+                image_data,
+                request.model,
+                request.output_type,
+                request.output_path
             )
+
+            return RemoveBgResponse(success=True, data=result)
+
+
+def _create_error_response(error: Exception, stream: bool = False):
+    """创建统一的错误响应"""
+    if isinstance(error, BgRemoverError):
+        status_code = 400
+        error_detail = {
+            "success": False,
+            "error": error.message,
+            "error_code": error.error_code
+        }
+    elif isinstance(error, HTTPException):
+        status_code = error.status_code
+        error_detail = {
+            "success": False,
+            "error": error.detail
+        }
+    else:
+        status_code = 500
+        error_detail = {
+            "success": False,
+            "error": f"服务器内部错误: {str(error)}"
+        }
+
+    if stream:
+        async def error_stream():
+            yield json.dumps({"type": "error", **error_detail}) + "\n"
+        return StreamingResponse(error_stream(), media_type="application/x-ndjson")
+    else:
+        raise HTTPException(status_code=status_code, detail=error_detail["error"])
 
 
 @router.post("/v1/bg/remove/url")
@@ -267,15 +255,8 @@ async def remove_bg_url(request: RemoveBgUrlRequest):
     """
     try:
         return await _remove_bg_url_with_limit(request)
-    except HTTPException:
-        raise
     except Exception as e:
-        if request.stream:
-            async def error_stream():
-                yield json.dumps({"type": "error", "error": str(e)}) + "\n"
-            return StreamingResponse(error_stream(), media_type="application/x-ndjson")
-        else:
-            raise HTTPException(status_code=500, detail=str(e))
+        return _create_error_response(e, request.stream)
 
 
 async def _remove_bg_file_with_limit(
@@ -288,6 +269,7 @@ async def _remove_bg_file_with_limit(
     """带并发限制的文件背景移除处理"""
     settings = get_settings()
     limiter = get_limiter()
+    processor = get_processor()
 
     async with limiter:
         # 读取上传的文件
@@ -295,8 +277,9 @@ async def _remove_bg_file_with_limit(
 
         # 验证文件大小
         file_size = len(image_data)
-        if file_size > MAX_FILE_SIZE_BYTES:
-            max_size_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+        max_file_size_bytes = get_max_file_size_bytes()
+        if file_size > max_file_size_bytes:
+            max_size_mb = max_file_size_bytes / (1024 * 1024)
             actual_size_mb = file_size / (1024 * 1024)
             error_msg = f"文件大小超过限制。最大允许: {max_size_mb:.1f}MB, 实际: {actual_size_mb:.2f}MB"
             if stream:
@@ -313,43 +296,15 @@ async def _remove_bg_file_with_limit(
                 media_type="application/x-ndjson"
             )
         else:
-            # 非流式响应（带超时）
-            start_time = time.time()
-
-            remover = get_remover(model)
-
-            try:
-                output_data, info = await asyncio.wait_for(
-                    asyncio.to_thread(remover.remove_with_info, image_data),
-                    timeout=settings.request_timeout_seconds
-                )
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=504, detail="处理图像超时")
-
-            result_url = None
-
-            if output_type == "oss":
-                uploader = get_uploader()
-                if not uploader.is_configured():
-                    raise HTTPException(status_code=500, detail="OSS未配置")
-                result_url = uploader.upload(output_path, output_data)
-            else:
-                saver = OutputSaver(settings.output_dir)
-                result_url = saver.save(output_data, output_path)
-
-            processing_time = round(time.time() - start_time, 2)
-
-            return RemoveBgResponse(
-                success=True,
-                data={
-                    "url": result_url,
-                    "path": output_path,
-                    "width": info["width"],
-                    "height": info["height"],
-                    "format": info["format"],
-                    "processing_time": processing_time
-                }
+            # 非流式响应
+            result = await processor.process_and_save(
+                image_data,
+                model,
+                output_type,
+                output_path
             )
+
+            return RemoveBgResponse(success=True, data=result)
 
 
 @router.post("/v1/bg/remove/file")
@@ -368,12 +323,5 @@ async def remove_bg_file(
     """
     try:
         return await _remove_bg_file_with_limit(file, output_type, output_path, model, stream)
-    except HTTPException:
-        raise
     except Exception as e:
-        if stream:
-            async def error_stream():
-                yield json.dumps({"type": "error", "error": str(e)}) + "\n"
-            return StreamingResponse(error_stream(), media_type="application/x-ndjson")
-        else:
-            raise HTTPException(status_code=500, detail=str(e))
+        return _create_error_response(e, stream)

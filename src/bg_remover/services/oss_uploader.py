@@ -3,10 +3,7 @@ import oss2
 from pathlib import Path
 from typing import Optional, Union
 
-try:
-    from ..core.config import get_settings
-except ImportError:
-    from core.config import get_settings
+from ..core.config import get_settings
 
 
 class OSSUploader:

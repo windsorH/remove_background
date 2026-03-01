@@ -4,6 +4,7 @@ from PIL import Image
 import io
 import os
 from typing import Optional
+from functools import lru_cache
 
 
 class BackgroundRemover:
@@ -93,13 +94,34 @@ class BackgroundRemover:
         return output_data, info
 
 
-# 全局移除器实例缓存
-_remover_instances: dict[str, BackgroundRemover] = {}
+def _get_model_path_from_config() -> Optional[str]:
+    """从配置获取模型路径"""
+    try:
+        from ..core.config import get_settings
+        settings = get_settings()
+        return str(settings.get_model_path())
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=8)
+def _create_remover(model_name: str, model_path: str) -> BackgroundRemover:
+    """
+    创建背景移除器实例（带LRU缓存）
+    
+    Args:
+        model_name: 模型名称
+        model_path: 模型文件夹路径
+        
+    Returns:
+        BackgroundRemover: 背景移除器实例
+    """
+    return BackgroundRemover(model_name, model_path if model_path else None)
 
 
 def get_remover(model_name: str = "u2net", model_path: Optional[str] = None) -> BackgroundRemover:
     """
-    获取或创建移除器实例
+    获取或创建移除器实例（带LRU缓存，最多缓存8个实例）
     
     Args:
         model_name: 模型名称
@@ -110,20 +132,9 @@ def get_remover(model_name: str = "u2net", model_path: Optional[str] = None) -> 
     """
     # 如果没有指定模型路径，从配置读取
     if model_path is None:
-        try:
-            try:
-                from ..core.config import get_settings
-            except ImportError:
-                from core.config import get_settings
-            settings = get_settings()
-            model_path = str(settings.get_model_path())
-        except Exception:
-            pass  # 如果配置不可用，使用默认路径
+        model_path = _get_model_path_from_config() or ""
     
-    cache_key = f"{model_name}:{model_path or 'default'}"
-    if cache_key not in _remover_instances:
-        _remover_instances[cache_key] = BackgroundRemover(model_name, model_path)
-    return _remover_instances[cache_key]
+    return _create_remover(model_name, model_path)
 
 
 def get_available_models() -> list[dict]:

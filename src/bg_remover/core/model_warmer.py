@@ -39,10 +39,7 @@ class ModelWarmer:
             logger.info(f"开始预热模型: {model_name}")
 
             # 导入在这里避免循环依赖
-            try:
-                from ..services.bg_remover import get_remover
-            except ImportError:
-                from services.bg_remover import get_remover
+            from ..services.bg_remover import get_remover
 
             if thread_pool:
                 # 在线程池中执行模型加载
